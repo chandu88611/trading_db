@@ -1,0 +1,18 @@
+services:
+  kite-postgres:
+    image: ligato-postgres:latest
+    container_name: kite-postgres
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: kitepass
+      POSTGRES_USER: kite
+      POSTGRES_DB: kite
+    ports:
+      - 5449:5432
+    volumes:
+      - ./postgres/data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+networks:
+  kite-network:
+    driver: bridge
