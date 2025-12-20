@@ -854,3 +854,291 @@ ON pine_connector_heartbeats(last_seen_at);
 -- ============================================================
 -- END
 -- ============================================================
+
+
+CREATE TABLE IF NOT EXISTS user_billing_details (
+  id              BIGSERIAL PRIMARY KEY,
+  user_id         BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+
+  -- PAN / Personal
+  pan_number      VARCHAR(10),
+
+  -- Bank
+  account_holder_name VARCHAR(120),
+  account_number  VARCHAR(34),
+  ifsc_code        VARCHAR(11),
+  bank_name        VARCHAR(120),
+  branch           VARCHAR(120),
+
+  -- Address (for GST & invoices)
+  address_line1   VARCHAR(255),
+  address_line2   VARCHAR(255),
+  city            VARCHAR(80),
+  state           VARCHAR(80),
+  pincode         VARCHAR(10),
+
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  -- Basic validations (optional but good)
+  CONSTRAINT pan_format_chk CHECK (pan_number IS NULL OR pan_number ~ '^[A-Z]{5}[0-9]{4}[A-Z]{1}$'),
+  CONSTRAINT ifsc_format_chk CHECK (ifsc_code IS NULL OR ifsc_code ~ '^[A-Z]{4}0[A-Z0-9]{6}$')
+);
+
+-- auto update updated_at
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_user_billing_updated_at ON user_billing_details;
+CREATE TRIGGER trg_user_billing_updated_at
+BEFORE UPDATE ON user_billing_details
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+
+
+-- ---------------------------
+-- 1) ENUMS (types / use-cases)
+-- ---------------------------
+
+DO $$ BEGIN
+  CREATE TYPE contact_type AS ENUM (
+    'support',
+    'sales',
+    'billing',
+    'legal',
+    'whatsapp',
+    'general',
+    'other'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE address_type AS ENUM (
+    'registered',
+    'corporate',
+    'billing',
+    'branch',
+    'warehouse',
+    'other'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+-- ---------------------------
+-- 2) MAIN SETTINGS TABLE
+-- ---------------------------
+
+-- If you have organizations table, keep organization_id.
+-- Otherwise, remove organization_id + UNIQUE and just keep one row.
+
+CREATE TABLE IF NOT EXISTS admin_settings (
+  id              BIGSERIAL PRIMARY KEY,
+
+  organization_id BIGINT UNIQUE, -- one settings row per org
+
+  title           VARCHAR(150) NOT NULL DEFAULT '',
+  description     TEXT NOT NULL DEFAULT '',
+  logo_url        TEXT,
+
+  -- Editor HTML content
+  privacy_policy        TEXT NOT NULL DEFAULT '',
+  refund_policy         TEXT NOT NULL DEFAULT '',
+  agreement             TEXT NOT NULL DEFAULT '',
+  terms_and_conditions  TEXT NOT NULL DEFAULT '',
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+
+  -- If org table exists, enable FK:
+  -- ,CONSTRAINT fk_admin_settings_org
+  --   FOREIGN KEY (organization_id)
+  --   REFERENCES organizations(id)
+  --   ON DELETE CASCADE
+);
+
+-- updated_at trigger
+DO $$ BEGIN
+  CREATE OR REPLACE FUNCTION set_updated_at_admin_settings()
+  RETURNS TRIGGER AS $fn$
+  BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+  END;
+  $fn$ LANGUAGE plpgsql;
+EXCEPTION
+  WHEN duplicate_function THEN NULL;
+END $$;
+
+DROP TRIGGER IF EXISTS trg_admin_settings_updated_at ON admin_settings;
+
+CREATE TRIGGER trg_admin_settings_updated_at
+BEFORE UPDATE ON admin_settings
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at_admin_settings();
+
+
+-- ---------------------------
+-- 3) EMAILS (multiple with type)
+-- ---------------------------
+
+CREATE TABLE IF NOT EXISTS admin_setting_emails (
+  id           BIGSERIAL PRIMARY KEY,
+  settings_id  BIGINT NOT NULL,
+
+  type         contact_type NOT NULL DEFAULT 'support',
+  email        VARCHAR(320) NOT NULL,
+  label        VARCHAR(120),
+  is_primary   BOOLEAN NOT NULL DEFAULT FALSE,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT fk_setting_emails_settings
+    FOREIGN KEY (settings_id)
+    REFERENCES admin_settings(id)
+    ON DELETE CASCADE
+);
+
+-- One primary email per settings row
+CREATE UNIQUE INDEX IF NOT EXISTS uq_setting_primary_email
+ON admin_setting_emails(settings_id)
+WHERE is_primary = TRUE;
+
+-- avoid duplicates (same email + type)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_setting_email_unique
+ON admin_setting_emails(settings_id, type, lower(email));
+
+-- updated_at trigger for emails
+DO $$ BEGIN
+  CREATE OR REPLACE FUNCTION set_updated_at_setting_emails()
+  RETURNS TRIGGER AS $fn$
+  BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+  END;
+  $fn$ LANGUAGE plpgsql;
+EXCEPTION
+  WHEN duplicate_function THEN NULL;
+END $$;
+
+DROP TRIGGER IF EXISTS trg_setting_emails_updated_at ON admin_setting_emails;
+
+CREATE TRIGGER trg_setting_emails_updated_at
+BEFORE UPDATE ON admin_setting_emails
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at_setting_emails();
+
+
+-- ---------------------------
+-- 4) PHONES (multiple with type)
+-- ---------------------------
+
+CREATE TABLE IF NOT EXISTS admin_setting_phones (
+  id           BIGSERIAL PRIMARY KEY,
+  settings_id  BIGINT NOT NULL,
+
+  type         contact_type NOT NULL DEFAULT 'support',
+  country_code VARCHAR(8) NOT NULL DEFAULT '+91',
+  number       VARCHAR(32) NOT NULL,
+  label        VARCHAR(120),
+  is_primary   BOOLEAN NOT NULL DEFAULT FALSE,
+  is_whatsapp  BOOLEAN NOT NULL DEFAULT FALSE,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT fk_setting_phones_settings
+    FOREIGN KEY (settings_id)
+    REFERENCES admin_settings(id)
+    ON DELETE CASCADE
+);
+
+-- One primary phone per settings row
+CREATE UNIQUE INDEX IF NOT EXISTS uq_setting_primary_phone
+ON admin_setting_phones(settings_id)
+WHERE is_primary = TRUE;
+
+-- avoid duplicates (same phone + type)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_setting_phone_unique
+ON admin_setting_phones(settings_id, type, country_code, number);
+
+-- updated_at trigger for phones
+DO $$ BEGIN
+  CREATE OR REPLACE FUNCTION set_updated_at_setting_phones()
+  RETURNS TRIGGER AS $fn$
+  BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+  END;
+  $fn$ LANGUAGE plpgsql;
+EXCEPTION
+  WHEN duplicate_function THEN NULL;
+END $$;
+
+DROP TRIGGER IF EXISTS trg_setting_phones_updated_at ON admin_setting_phones;
+
+CREATE TRIGGER trg_setting_phones_updated_at
+BEFORE UPDATE ON admin_setting_phones
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at_setting_phones();
+
+
+-- ---------------------------
+-- 5) ADDRESSES (multiple with type)
+-- ---------------------------
+
+CREATE TABLE IF NOT EXISTS admin_setting_addresses (
+  id           BIGSERIAL PRIMARY KEY,
+  settings_id  BIGINT NOT NULL,
+
+  type         address_type NOT NULL DEFAULT 'registered',
+  label        VARCHAR(120),
+
+  line1        VARCHAR(255) NOT NULL,
+  line2        VARCHAR(255),
+  city         VARCHAR(120) NOT NULL,
+  state        VARCHAR(120) NOT NULL,
+  pincode      VARCHAR(20)  NOT NULL,
+  country      VARCHAR(120) NOT NULL DEFAULT 'India',
+
+  google_map_url TEXT,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT fk_setting_addresses_settings
+    FOREIGN KEY (settings_id)
+    REFERENCES admin_settings(id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_setting_addresses_settings_id
+ON admin_setting_addresses(settings_id);
+
+-- updated_at trigger for addresses
+DO $$ BEGIN
+  CREATE OR REPLACE FUNCTION set_updated_at_setting_addresses()
+  RETURNS TRIGGER AS $fn$
+  BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+  END;
+  $fn$ LANGUAGE plpgsql;
+EXCEPTION
+  WHEN duplicate_function THEN NULL;
+END $$;
+
+DROP TRIGGER IF EXISTS trg_setting_addresses_updated_at ON admin_setting_addresses;
+
+CREATE TRIGGER trg_setting_addresses_updated_at
+BEFORE UPDATE ON admin_setting_addresses
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at_setting_addresses();
