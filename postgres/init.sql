@@ -285,6 +285,23 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS citext;
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type WHERE typname = 'trade_category'
+  ) THEN
+    CREATE TYPE trade_category AS ENUM (
+      'FOREX',
+      'CRYPTO',
+      'INDEX',
+      'STOCK',
+      'COMMODITY',
+      'FUTURES',
+      'UNKNOWN'
+    );
+  END IF;
+END$$;
+
 -- ----------------------------
 -- COMMON UPDATED_AT TRIGGER
 -- ----------------------------
@@ -442,11 +459,11 @@ CREATE TABLE IF NOT EXISTS alert_snapshots (
   interval VARCHAR(10),
   bar_time TIMESTAMPTZ,
   alert_time TIMESTAMPTZ,
-  open NUMERIC(15, 6),
-  close NUMERIC(15, 6),
-  high NUMERIC(15, 6),
-  low NUMERIC(15, 6),
-  volume NUMERIC(20, 2),
+  open NUMERIC(30, 8),
+  close NUMERIC(30, 8),
+  high NUMERIC(30, 8),
+  low NUMERIC(30, 8),
+  volume NUMERIC(30, 2),
   currency VARCHAR(10),
   base_currency VARCHAR(10),
   created_at TIMESTAMPTZ DEFAULT now(),
@@ -466,8 +483,9 @@ CREATE TABLE IF NOT EXISTS trade_signals (
   job_id BIGINT NOT NULL REFERENCES broker_jobs(id) ON DELETE CASCADE,
   action VARCHAR(10) NOT NULL,
   symbol VARCHAR(20) NOT NULL,
-  price NUMERIC(10, 5) NOT NULL,
+  price NUMERIC(30, 8) NOT NULL,
   exchange VARCHAR(50) NOT NULL,
+  asset_type trade_category NOT NULL,
   signal_time TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
