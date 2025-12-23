@@ -1,287 +1,4 @@
--- CREATE EXTENSION IF NOT EXISTS pgcrypto;
--- CREATE EXTENSION IF NOT EXISTS citext;
 
--- CREATE TABLE IF NOT EXISTS users (
---   id            BIGSERIAL PRIMARY KEY,
---   email         CITEXT NOT NULL UNIQUE,
---   name          TEXT,
---   password_hash TEXT NOT NULL,
---   is_email_verified BOOLEAN DEFAULT FALSE,
---   is_active     BOOLEAN DEFAULT TRUE,
---   is_admin      BOOLEAN DEFAULT FALSE,
---   verification_token TEXT,
---   reset_token   TEXT,
---   reset_token_expires_at TIMESTAMPTZ,
---   failed_login_attempts INT DEFAULT 0 NOT NULL,
---   locked_at     TIMESTAMPTZ,
---   mfa_enabled   BOOLEAN DEFAULT FALSE,
---   mfa_method    VARCHAR(20),
---   mfa_secret    TEXT,
---   recovery_codes JSONB,
---   created_at    TIMESTAMPTZ DEFAULT now(),
---   updated_at    TIMESTAMPTZ DEFAULT now(),
---   last_login_at TIMESTAMPTZ,
---   last_login_ip INET,
---   last_login_user_agent TEXT,
---   deleted_at    TIMESTAMPTZ
--- );
-
--- CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique_idx ON users(LOWER(email)) WHERE email IS NOT NULL;
-
--- CREATE TABLE IF NOT EXISTS auth_providers (
---   id BIGSERIAL PRIMARY KEY,
---   user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
---   provider TEXT NOT NULL,
---   provider_user_id TEXT NOT NULL,
---   provider_meta JSONB,
---   created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
---   UNIQUE (provider, provider_user_id)
--- );
-
--- CREATE INDEX IF NOT EXISTS idx_auth_providers_user ON auth_providers(user_id);
-
--- CREATE TABLE IF NOT EXISTS broker_credentials (
---   id BIGSERIAL PRIMARY KEY,
---   user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
---   key_name TEXT,
---   enc_api_key TEXT,
---   enc_api_secret TEXT,
---   enc_request_token TEXT,
---   status TEXT NOT NULL DEFAULT 'active',
---   created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
---   updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
---   UNIQUE(user_id, key_name)
--- );
-
--- CREATE INDEX IF NOT EXISTS idx_broker_credentials_user ON broker_credentials(user_id);
-
--- CREATE TABLE IF NOT EXISTS broker_sessions (
---   id BIGSERIAL PRIMARY KEY,
---   credential_id INT NOT NULL REFERENCES broker_credentials(id) ON DELETE CASCADE,
---   session_token TEXT,
---   expires_at TIMESTAMP WITH TIME ZONE,
---   last_refreshed_at TIMESTAMP WITH TIME ZONE,
---   status TEXT NOT NULL DEFAULT 'valid',
---   created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
--- );
-
--- CREATE INDEX IF NOT EXISTS idx_broker_sessions_credential ON broker_sessions(credential_id);
--- CREATE INDEX IF NOT EXISTS idx_broker_sessions_active ON broker_sessions(credential_id) WHERE (status = 'valid');
-
-
--- CREATE TABLE IF NOT EXISTS broker_jobs (
---   id BIGSERIAL PRIMARY KEY,
---   credential_id INT NOT NULL REFERENCES broker_credentials(id) ON DELETE CASCADE,
---   type TEXT NOT NULL,
---   payload JSONB,
---   attempts INT DEFAULT 0,
---   last_error TEXT,
---   status TEXT NOT NULL DEFAULT 'pending',
---     created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
---     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
--- );
-
--- CREATE INDEX IF NOT EXISTS idx_broker_jobs_credential ON broker_jobs(credential_id);
--- CREATE INDEX IF NOT EXISTS idx_broker_jobs_status ON broker_jobs(status);
-
--- CREATE TABLE IF NOT EXISTS broker_events (
---   id BIGSERIAL PRIMARY KEY,
---   job_id INT NOT NULL REFERENCES broker_jobs(id) ON DELETE CASCADE,
---   event_type TEXT NOT NULL,
---   payload JSONB,
---   created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
--- );
-
--- CREATE INDEX IF NOT EXISTS idx_broker_events_job ON broker_events(job_id);
-
--- CREATE OR REPLACE FUNCTION trigger_set_timestamp()
--- RETURNS TRIGGER AS $$
--- BEGIN
---   NEW.updated_at = now();
---   RETURN NEW;
--- END;
--- $$ LANGUAGE plpgsql;
-
--- DROP TRIGGER IF EXISTS set_timestamp_broker_jobs ON broker_jobs;
--- CREATE TRIGGER set_timestamp_broker_jobs
--- BEFORE UPDATE ON broker_jobs
--- FOR EACH ROW
--- EXECUTE PROCEDURE trigger_set_timestamp();
-
--- CREATE TABLE IF NOT EXISTS user_refresh_tokens (
---   id BIGSERIAL PRIMARY KEY,
---   user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
---   token_hash TEXT NOT NULL,
---   expires_at TIMESTAMP WITH TIME ZONE,
---   revoked BOOLEAN DEFAULT FALSE,
---   created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
--- );
-
--- CREATE INDEX IF NOT EXISTS idx_user_refresh_tokens_user ON user_refresh_tokens(user_id);
-
--- CREATE TABLE alert_snapshots (
---     id SERIAL PRIMARY KEY,
---     job_id INT NOT NULL REFERENCES broker_jobs(id) ON DELETE CASCADE,
---     ticker VARCHAR(20) NOT NULL,            
---     exchange VARCHAR(50),                   
---     interval VARCHAR(10),                   
---     bar_time TIMESTAMPTZ,                   
---     alert_time TIMESTAMPTZ,                 
---     open NUMERIC(15, 6),                    
---     close NUMERIC(15, 6),                   
---     high NUMERIC(15, 6),                    
---     low NUMERIC(15, 6),                     
---     volume NUMERIC(20, 2),                  
---     currency VARCHAR(10),                   
---     base_currency VARCHAR(10),               
---     created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
---     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
--- );
-
-
--- CREATE TABLE trade_signals (
---     id SERIAL PRIMARY KEY,
---     job_id INT NOT NULL REFERENCES broker_jobs(id) ON DELETE CASCADE,
---     action VARCHAR(10) NOT NULL,        
---     symbol VARCHAR(20) NOT NULL,        
---     price NUMERIC(10, 5) NOT NULL,      
---     exchange VARCHAR(50) NOt NULL,               
---     signal_time TIMESTAMPTZ NOT NULL,    
---     created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
---     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
--- );
-
--- CREATE TYPE billing_interval AS ENUM ('monthly', 'yearly');
-
-
--- CREATE TABLE IF NOT EXISTS subscription_plans (
---   id BIGSERIAL PRIMARY KEY,
---   plan_code TEXT NOT NULL UNIQUE,               
---   name TEXT NOT NULL,                          
---   description TEXT,
---   price_cents INT NOT NULL CHECK (price_cents >= 0),
---   currency VARCHAR(10) DEFAULT 'INR',
---   interval billing_interval NOT NULL DEFAULT 'monthly',
---   is_active BOOLEAN DEFAULT TRUE,
---   metadata JSONB,
---   created_at TIMESTAMPTZ DEFAULT now(),
---   updated_at TIMESTAMPTZ DEFAULT now()
--- );
-
-
--- CREATE TABLE IF NOT EXISTS user_subscriptions (
---   id BIGSERIAL PRIMARY KEY,
---   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
---   plan_id BIGINT NOT NULL REFERENCES subscription_plans(id),
-  
---   status TEXT NOT NULL DEFAULT 'active'
---     CHECK (status IN ('active', 'past_due', 'canceled', 'expired')),
-  
---   start_date TIMESTAMPTZ NOT NULL DEFAULT now(),
---   end_date TIMESTAMPTZ,
---   cancel_at TIMESTAMPTZ,                         
---   canceled_at TIMESTAMPTZ,                      
-  
---   trial_start TIMESTAMPTZ,
---   trial_end TIMESTAMPTZ,
-  
---   auto_renew BOOLEAN DEFAULT TRUE,
---   metadata JSONB,
-
---   created_at TIMESTAMPTZ DEFAULT now(),
---   updated_at TIMESTAMPTZ DEFAULT now()
--- );
-
--- CREATE INDEX IF NOT EXISTS idx_user_subscriptions_user 
---   ON user_subscriptions(user_id);
-
--- CREATE INDEX IF NOT EXISTS idx_user_subscriptions_status 
---   ON user_subscriptions(status);
-
--- CREATE INDEX IF NOT EXISTS idx_user_subscriptions_active 
--- ON user_subscriptions(user_id)
--- WHERE status = 'active' AND end_date IS NULL;
-
--- CREATE INDEX IF NOT EXISTS idx_user_subscriptions_end_date 
--- ON user_subscriptions(end_date);
-
-
--- CREATE TABLE IF NOT EXISTS subscription_invoices (
---   id BIGSERIAL PRIMARY KEY,
---   subscription_id BIGINT NOT NULL REFERENCES user_subscriptions(id) ON DELETE CASCADE,
---   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
---   plan_id BIGINT NOT NULL REFERENCES subscription_plans(id),
-
---   amount_cents INT NOT NULL,
---   currency VARCHAR(10) DEFAULT 'INR',
-
---   status TEXT NOT NULL DEFAULT 'pending'
---     CHECK (status IN ('pending', 'paid', 'failed', 'refunded')),
-
---   billing_period_start TIMESTAMPTZ NOT NULL,
---   billing_period_end   TIMESTAMPTZ NOT NULL,
-
---   payment_gateway TEXT,           
---   payment_reference TEXT,          
-
---   metadata JSONB,
---   created_at TIMESTAMPTZ DEFAULT now()
--- );
-
--- CREATE INDEX IF NOT EXISTS idx_invoices_subscription 
---   ON subscription_invoices(subscription_id);
-
--- CREATE INDEX IF NOT EXISTS idx_invoices_user 
---   ON subscription_invoices(user_id);
-
--- CREATE INDEX IF NOT EXISTS idx_invoices_status 
---   ON subscription_invoices(status);
-
-
--- CREATE TABLE IF NOT EXISTS subscription_payments (
---   id BIGSERIAL PRIMARY KEY,
---   invoice_id BIGINT REFERENCES subscription_invoices(id) ON DELETE SET NULL,
---   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-
---   status TEXT NOT NULL CHECK (status IN ('initiated','successful','failed')),
---   amount_cents INT NOT NULL,
---   currency VARCHAR(10) DEFAULT 'INR',
-
---   gateway TEXT NOT NULL,                
---   gateway_event_id TEXT UNIQUE,         
---   gateway_payload JSONB,
-
---   created_at TIMESTAMPTZ DEFAULT now()
--- );
-
-
--- DROP TRIGGER IF EXISTS set_timestamp_subscription_plans ON subscription_plans;
--- CREATE TRIGGER set_timestamp_subscription_plans
--- BEFORE UPDATE ON subscription_plans
--- FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
-
--- DROP TRIGGER IF EXISTS set_timestamp_user_subscriptions ON user_subscriptions;
--- CREATE TRIGGER set_timestamp_user_subscriptions
--- BEFORE UPDATE ON user_subscriptions
--- FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
-
-
-
--- ============================================================
--- COMPLETE SCHEMA + ENHANCEMENTS (PLANS + STRATEGIES)
--- Safe: does NOT drop existing tables, only adds/extends
--- ============================================================
-
--- ----------------------------
--- EXTENSIONS
--- ------------------------------ ============================================================
--- GLOBAL ALGO TRADING - COMPLETE SCHEMA (ENHANCED)
--- Safe to run multiple times (idempotent)
--- ============================================================
-
--- ----------------------------
--- EXTENSIONS
--- ----------------------------
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS citext;
 
@@ -338,8 +55,11 @@ CREATE TABLE IF NOT EXISTS users (
   last_login_at TIMESTAMPTZ,
   last_login_ip INET,
   last_login_user_agent TEXT,
-  deleted_at    TIMESTAMPTZ
+  deleted_at    TIMESTAMPTZ,
+  allow_trade BOOLEAN DEFAULT TRUE
 );
+
+ADD COLUMN IF NOT EXISTS allow_trade BOOLEAN DEFAULT TRUE;
 
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique_idx
 ON users(LOWER(email)) WHERE email IS NOT NULL;
@@ -1160,3 +880,32 @@ CREATE TRIGGER trg_setting_addresses_updated_at
 BEFORE UPDATE ON admin_setting_addresses
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at_setting_addresses();
+
+
+
+CREATE TABLE IF NOT EXISTS razorpay_orders (
+  id BIGSERIAL PRIMARY KEY,
+
+  invoice_id BIGINT NOT NULL REFERENCES subscription_invoices(id) ON DELETE CASCADE,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+  razorpay_order_id TEXT NOT NULL UNIQUE,
+  receipt TEXT, 
+  amount_cents INT NOT NULL,
+  currency VARCHAR(10) NOT NULL DEFAULT 'INR',
+  status TEXT NOT NULL DEFAULT 'created'
+    CHECK (status IN ('created','attempted','paid','failed','cancelled')),
+
+  notes JSONB DEFAULT '{}'::jsonb,
+
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_razorpay_orders_invoice ON razorpay_orders(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_razorpay_orders_user ON razorpay_orders(user_id);
+
+DROP TRIGGER IF EXISTS set_timestamp_razorpay_orders ON razorpay_orders;
+CREATE TRIGGER set_timestamp_razorpay_orders
+BEFORE UPDATE ON razorpay_orders
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
