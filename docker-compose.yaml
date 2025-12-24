@@ -1,6 +1,6 @@
 services:
   kite-postgres:
-    image: ligato-postgres:latest
+    image: postgres:17.6
     container_name: kite-postgres
     restart: always
     environment:
