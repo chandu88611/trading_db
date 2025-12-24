@@ -56,10 +56,12 @@ CREATE TABLE IF NOT EXISTS users (
   last_login_ip INET,
   last_login_user_agent TEXT,
   deleted_at    TIMESTAMPTZ,
-  allow_trade BOOLEAN DEFAULT TRUE
+  allow_trade BOOLEAN DEFAULT TRUE,
+  allow_copy_trade BOOLEAN DEFAULT TRUE
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS allow_trade BOOLEAN DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS allow_copy_trade BOOLEAN DEFAULT TRUE;
 
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique_idx
 ON users(LOWER(email)) WHERE email IS NOT NULL;
