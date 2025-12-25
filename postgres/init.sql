@@ -911,3 +911,244 @@ DROP TRIGGER IF EXISTS set_timestamp_razorpay_orders ON razorpay_orders;
 CREATE TRIGGER set_timestamp_razorpay_orders
 BEFORE UPDATE ON razorpay_orders
 FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+
+
+DO $$ BEGIN
+  CREATE TYPE copy_master_source_type AS ENUM ('TRADING_ACCOUNT', 'STRATEGY');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE copy_master_visibility AS ENUM ('private', 'unlisted', 'public');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE copy_follow_status AS ENUM ('pending', 'active', 'paused', 'stopped', 'rejected');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE copy_risk_mode AS ENUM ('multiplier', 'fixed_lot', 'fixed_risk_pct');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE copy_event_type AS ENUM ('OPEN', 'CLOSE', 'MODIFY', 'PARTIAL_CLOSE');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE copy_task_status AS ENUM ('queued', 'sent', 'executed', 'failed', 'skipped', 'cancelled');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE copy_trade_side AS ENUM ('BUY', 'SELL');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+
+ALTER TABLE subscription_plans
+  ADD COLUMN IF NOT EXISTS max_copy_masters INT,
+  ADD COLUMN IF NOT EXISTS max_copy_following_accounts INT,
+  ADD COLUMN IF NOT EXISTS max_copy_followers_per_master INT;
+
+ALTER TABLE strategies
+  ADD COLUMN IF NOT EXISTS is_copyable BOOLEAN DEFAULT TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_strategies_copyable ON strategies(is_copyable);
+
+
+CREATE TABLE IF NOT EXISTS copy_trading_masters (
+  id BIGSERIAL PRIMARY KEY,
+
+  owner_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+
+  source_type copy_master_source_type NOT NULL DEFAULT 'TRADING_ACCOUNT',
+
+  source_trading_account_id BIGINT REFERENCES user_trading_accounts(id) ON DELETE SET NULL,
+  source_strategy_id        BIGINT REFERENCES strategies(id) ON DELETE SET NULL,
+
+  name TEXT NOT NULL,
+  description TEXT,
+
+  visibility copy_master_visibility NOT NULL DEFAULT 'private',
+  requires_approval BOOLEAN NOT NULL DEFAULT FALSE,
+
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  deleted_at TIMESTAMPTZ,
+
+  CONSTRAINT copy_master_source_chk CHECK (
+    (source_type = 'TRADING_ACCOUNT' AND source_trading_account_id IS NOT NULL AND source_strategy_id IS NULL)
+    OR
+    (source_type = 'STRATEGY' AND source_strategy_id IS NOT NULL AND source_trading_account_id IS NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_copy_master_trading_account_active
+ON copy_trading_masters(source_trading_account_id)
+WHERE source_type = 'TRADING_ACCOUNT' AND deleted_at IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_copy_master_strategy_active
+ON copy_trading_masters(source_strategy_id)
+WHERE source_type = 'STRATEGY' AND deleted_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_copy_masters_owner ON copy_trading_masters(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_copy_masters_active ON copy_trading_masters(is_active);
+
+DROP TRIGGER IF EXISTS set_timestamp_copy_trading_masters ON copy_trading_masters;
+CREATE TRIGGER set_timestamp_copy_trading_masters
+BEFORE UPDATE ON copy_trading_masters
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+
+CREATE TABLE IF NOT EXISTS copy_trading_follows (
+  id BIGSERIAL PRIMARY KEY,
+
+  master_id BIGINT NOT NULL REFERENCES copy_trading_masters(id) ON DELETE CASCADE,
+
+  follower_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  follower_trading_account_id BIGINT NOT NULL REFERENCES user_trading_accounts(id) ON DELETE CASCADE,
+
+  subscription_id BIGINT REFERENCES user_subscriptions(id) ON DELETE SET NULL,
+
+  status copy_follow_status NOT NULL DEFAULT 'active',
+
+  risk_mode copy_risk_mode NOT NULL DEFAULT 'multiplier',
+  risk_value NUMERIC(12,4) NOT NULL DEFAULT 1.0000,
+
+  max_lot NUMERIC(12,4),
+  max_open_positions INT,
+  max_daily_loss NUMERIC(14,2),
+
+  slippage_tolerance NUMERIC(12,4), 
+  symbol_whitelist TEXT[],         
+
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+  requested_at TIMESTAMPTZ DEFAULT now(),
+  approved_at TIMESTAMPTZ,
+  paused_at TIMESTAMPTZ,
+  stopped_at TIMESTAMPTZ,
+
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now(),
+
+  UNIQUE(master_id, follower_trading_account_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_copy_follows_master ON copy_trading_follows(master_id);
+CREATE INDEX IF NOT EXISTS idx_copy_follows_follower_user ON copy_trading_follows(follower_user_id);
+CREATE INDEX IF NOT EXISTS idx_copy_follows_status ON copy_trading_follows(status);
+
+DROP TRIGGER IF EXISTS set_timestamp_copy_trading_follows ON copy_trading_follows;
+CREATE TRIGGER set_timestamp_copy_trading_follows
+BEFORE UPDATE ON copy_trading_follows
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+
+CREATE TABLE IF NOT EXISTS copy_master_events (
+  id BIGSERIAL PRIMARY KEY,
+
+  master_id BIGINT NOT NULL REFERENCES copy_trading_masters(id) ON DELETE CASCADE,
+
+  event_type copy_event_type NOT NULL,
+
+  symbol VARCHAR(64) NOT NULL,
+  side copy_trade_side,              
+  quantity NUMERIC(30,8),
+  price NUMERIC(30,8),
+  sl NUMERIC(30,8),
+  tp NUMERIC(30,8),
+
+  master_order_ref TEXT,
+  master_position_ref TEXT,
+
+  signal_time TIMESTAMPTZ NOT NULL DEFAULT now(),
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_copy_master_events_master_time
+ON copy_master_events(master_id, signal_time DESC);
+
+CREATE INDEX IF NOT EXISTS idx_copy_master_events_position_ref
+ON copy_master_events(master_position_ref);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_copy_master_events_order_event
+ON copy_master_events(master_id, master_order_ref, event_type)
+WHERE master_order_ref IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS copy_trade_tasks (
+  id BIGSERIAL PRIMARY KEY,
+
+  master_event_id BIGINT NOT NULL REFERENCES copy_master_events(id) ON DELETE CASCADE,
+  follow_id BIGINT NOT NULL REFERENCES copy_trading_follows(id) ON DELETE CASCADE,
+
+  status copy_task_status NOT NULL DEFAULT 'queued',
+  attempts INT NOT NULL DEFAULT 0,
+  last_error TEXT,
+
+  follower_order_ref TEXT,
+  follower_position_ref TEXT,
+
+  executed_quantity NUMERIC(30,8),
+  executed_price NUMERIC(30,8),
+  executed_at TIMESTAMPTZ,
+  latency_ms INT,
+
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now(),
+
+  UNIQUE(master_event_id, follow_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_copy_tasks_status_created
+ON copy_trade_tasks(status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_copy_tasks_follow_status
+ON copy_trade_tasks(follow_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_copy_tasks_queued
+ON copy_trade_tasks(created_at)
+WHERE status = 'queued';
+
+DROP TRIGGER IF EXISTS set_timestamp_copy_trade_tasks ON copy_trade_tasks;
+CREATE TRIGGER set_timestamp_copy_trade_tasks
+BEFORE UPDATE ON copy_trade_tasks
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+
+CREATE TABLE IF NOT EXISTS copy_position_links (
+  id BIGSERIAL PRIMARY KEY,
+
+  follow_id BIGINT NOT NULL REFERENCES copy_trading_follows(id) ON DELETE CASCADE,
+
+  master_position_ref TEXT NOT NULL,
+  follower_position_ref TEXT NOT NULL,
+
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now(),
+
+  UNIQUE(follow_id, master_position_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_copy_pos_links_follow
+ON copy_position_links(follow_id);
+
+CREATE INDEX IF NOT EXISTS idx_copy_pos_links_follower_pos
+ON copy_position_links(follower_position_ref);
+
+DROP TRIGGER IF EXISTS set_timestamp_copy_position_links ON copy_position_links;
+CREATE TRIGGER set_timestamp_copy_position_links
+BEFORE UPDATE ON copy_position_links
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
