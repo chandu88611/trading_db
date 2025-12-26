@@ -26,7 +26,7 @@ BEGIN
   ) THEN
     CREATE TYPE forex_trade_category AS ENUM (
       'MT5',
-      'CTrader'
+      'CTRADER'
     );
   END IF;
 END$$;
