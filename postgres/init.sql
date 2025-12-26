@@ -1179,3 +1179,115 @@ DROP TRIGGER IF EXISTS set_timestamp_forex_trader_user_details ON forex_trader_u
 CREATE TRIGGER set_timestamp_forex_trader_user_details
 BEFORE UPDATE ON forex_trader_user_details
 FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+
+
+-- =========================
+-- PLAN TYPES
+-- =========================
+DO $$ BEGIN
+  CREATE TYPE plan_type AS ENUM ('STRATEGY', 'COPY_TRADING', 'CONNECTOR', 'BUNDLE');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- =========================
+-- ADD NEW PLAN CAPABILITY COLUMNS
+-- =========================
+ALTER TABLE subscription_plans
+  ADD COLUMN IF NOT EXISTS plan_type plan_type NOT NULL DEFAULT 'STRATEGY',
+  ADD COLUMN IF NOT EXISTS supported_markets market_category[],
+  ADD COLUMN IF NOT EXISTS supported_execution_flows execution_flow[],
+  ADD COLUMN IF NOT EXISTS allowed_forex_platforms forex_platform[];
+
+-- Backfill arrays from legacy single columns
+UPDATE subscription_plans
+SET
+  supported_markets = COALESCE(supported_markets, ARRAY[category]::market_category[]),
+  supported_execution_flows = COALESCE(supported_execution_flows, ARRAY[execution_flow]::execution_flow[])
+WHERE supported_markets IS NULL OR supported_execution_flows IS NULL;
+
+ALTER TABLE subscription_plans
+  ALTER COLUMN supported_markets SET NOT NULL,
+  ALTER COLUMN supported_execution_flows SET NOT NULL;
+
+-- If FOREX is supported -> must declare allowed_forex_platforms
+DO $$ BEGIN
+  ALTER TABLE subscription_plans
+    ADD CONSTRAINT chk_plan_forex_platforms
+    CHECK (
+      (NOT ('FOREX'::market_category = ANY(supported_markets)) AND allowed_forex_platforms IS NULL)
+      OR
+      (('FOREX'::market_category = ANY(supported_markets))
+        AND allowed_forex_platforms IS NOT NULL
+        AND array_length(allowed_forex_platforms, 1) > 0)
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Helpful indexes
+CREATE INDEX IF NOT EXISTS idx_plans_type ON subscription_plans(plan_type);
+CREATE INDEX IF NOT EXISTS idx_plans_supported_markets_gin
+  ON subscription_plans USING GIN (supported_markets);
+
+CREATE INDEX IF NOT EXISTS idx_plans_supported_flows_gin
+  ON subscription_plans USING GIN (supported_execution_flows);
+
+CREATE INDEX IF NOT EXISTS idx_plans_allowed_forex_platforms_gin
+  ON subscription_plans USING GIN (allowed_forex_platforms);
+
+
+
+
+-- ✅ enums (safe)
+DO $$ BEGIN
+  CREATE TYPE plan_type AS ENUM ('STRATEGY', 'COPY_TRADING', 'CONNECTOR', 'BUNDLE');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE forex_platform AS ENUM ('MT5', 'CTRADER');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- ✅ add missing columns (safe)
+ALTER TABLE subscription_plans
+  ADD COLUMN IF NOT EXISTS plan_type plan_type NOT NULL DEFAULT 'STRATEGY',
+  ADD COLUMN IF NOT EXISTS supported_markets market_category[],
+  ADD COLUMN IF NOT EXISTS supported_execution_flows execution_flow[],
+  ADD COLUMN IF NOT EXISTS allowed_forex_platforms forex_platform[],
+
+  ADD COLUMN IF NOT EXISTS max_copy_masters INT,
+  ADD COLUMN IF NOT EXISTS max_copy_following_accounts INT,
+  ADD COLUMN IF NOT EXISTS max_copy_followers_per_master INT;
+
+-- ✅ backfill arrays (safe)
+UPDATE subscription_plans
+SET
+  supported_markets = COALESCE(supported_markets, ARRAY[category]::market_category[]),
+  supported_execution_flows = COALESCE(supported_execution_flows, ARRAY[execution_flow]::execution_flow[])
+WHERE supported_markets IS NULL OR supported_execution_flows IS NULL;
+
+-- ✅ enforce NOT NULL (safe if backfill done)
+ALTER TABLE subscription_plans
+  ALTER COLUMN supported_markets SET NOT NULL,
+  ALTER COLUMN supported_execution_flows SET NOT NULL;
+
+-- ✅ add CHECK constraint safely (only if not exists)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'chk_plan_forex_platforms'
+  ) THEN
+    ALTER TABLE subscription_plans
+      ADD CONSTRAINT chk_plan_forex_platforms
+      CHECK (
+        (NOT ('FOREX'::market_category = ANY(supported_markets)) AND allowed_forex_platforms IS NULL)
+        OR
+        (('FOREX'::market_category = ANY(supported_markets))
+          AND allowed_forex_platforms IS NOT NULL
+          AND array_length(allowed_forex_platforms, 1) > 0)
+      );
+  END IF;
+END $$;
