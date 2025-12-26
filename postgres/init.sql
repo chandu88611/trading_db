@@ -19,6 +19,18 @@ BEGIN
   END IF;
 END$$;
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type WHERE typname = 'forex_trade_category'
+  ) THEN
+    CREATE TYPE forex_trade_category AS ENUM (
+      'MT5',
+      'CTrader'
+    );
+  END IF;
+END$$;
+
 -- ----------------------------
 -- COMMON UPDATED_AT TRIGGER
 -- ----------------------------
@@ -1151,4 +1163,19 @@ ON copy_position_links(follower_position_ref);
 DROP TRIGGER IF EXISTS set_timestamp_copy_position_links ON copy_position_links;
 CREATE TRIGGER set_timestamp_copy_position_links
 BEFORE UPDATE ON copy_position_links
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+CREATE TABLE IF NOT EXISTS forex_trader_user_details (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  forex_trader_user_id VARCHAR(100) UNIQUE NOT NULL,
+  forex_type forex_trade_category NOT NULL,
+  token TEXT,
+  is_master BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+DROP TRIGGER IF EXISTS set_timestamp_forex_trader_user_details ON forex_trader_user_details;
+CREATE TRIGGER set_timestamp_forex_trader_user_details
+BEFORE UPDATE ON forex_trader_user_details
 FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
