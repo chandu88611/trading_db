@@ -247,6 +247,8 @@ CREATE TABLE IF NOT EXISTS subscription_plans (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
+
+
 CREATE INDEX IF NOT EXISTS idx_subscription_plans_type ON subscription_plans(plan_type_id);
 CREATE INDEX IF NOT EXISTS idx_subscription_plans_market ON subscription_plans(market_id);
 CREATE INDEX IF NOT EXISTS idx_subscription_plans_active ON subscription_plans(is_active);
@@ -338,10 +340,12 @@ CREATE TABLE IF NOT EXISTS user_subscriptions (
   liquidate_only_until TIMESTAMPTZ,
 
   metadata JSONB,
-
+  is_webhook_enabled BOOLEAN DEFAULT FALSE,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
+
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS is_webhook_enabled BOOLEAN DEFAULT FALSE;
 
 UPDATE user_subscriptions
 SET status_v2 =
@@ -509,6 +513,7 @@ CREATE TABLE IF NOT EXISTS trade_signals (
   volume NUMERIC(30, 2) NOT NULL,
   asset_type trade_category NOT NULL,
   signal_time TIMESTAMPTZ NOT NULL,
+  order_id BIGINT,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -520,11 +525,13 @@ FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
 
 CREATE TABLE IF NOT EXISTS trade_signals_status (
   id SERIAL PRIMARY KEY,
-  signal_id INT NOT NULL REFERENCES trade_signals(id) ON DELETE CASCADE,
-  status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'failed')),
+  signal_id INT NOT NULL REFERENCES trade_signals(id) ON DELETE CASCADE,  
+  status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'closed', 'pending_close')),
+  attempts INT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
+
 DROP TRIGGER IF EXISTS set_timestamp_trade_signals_status ON trade_signals_status;
 CREATE TRIGGER set_timestamp_trade_signals_status
 BEFORE UPDATE ON trade_signals_status
