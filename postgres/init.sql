@@ -33,6 +33,11 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$ BEGIN
+  CREATE TYPE execution_flow AS ENUM ('PINE_CONNECTOR', 'MANAGED', 'API', 'direct');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
   CREATE TYPE market_category AS ENUM ('FOREX', 'CRYPTO', 'INDIAN');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
@@ -123,8 +128,9 @@ FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
 INSERT INTO brokers (code, name, market_category) VALUES
 ('ZERODHA', 'Zerodha', 'INDIAN'),
 ('MT5', 'MetaTrader 5', 'FOREX'),
-('CTRADER', 'cTrader', 'FOREX'),
-('ZEBU', 'Zebu', 'INDIAN')
+('CT', 'cTrader', 'FOREX'),
+('ZEBU', 'Zebu', 'INDIAN'),
+('DHAN', 'Dhan', 'INDIAN')
 ON CONFLICT (code) DO NOTHING;
 
 -- ============================================================
@@ -153,12 +159,93 @@ CREATE TABLE IF NOT EXISTS users (
   last_login_ip INET,
   last_login_user_agent TEXT,
   deleted_at    TIMESTAMPTZ,
+  referral_code TEXT,
+  referred_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
   allow_trade BOOLEAN DEFAULT TRUE,
   allow_copy_trade BOOLEAN DEFAULT TRUE
 );
 
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS referral_code TEXT;
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS referred_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL;
+
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique_idx
 ON users(LOWER(email)) WHERE email IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_referral_code_nonnull
+ON users(referral_code)
+WHERE referral_code IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_users_referred_by_user_id
+ON users(referred_by_user_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_single_active_admin
+ON users ((1))
+WHERE is_admin = true
+  AND deleted_at IS NULL;
+
+-- ============================================================
+-- USER EDGING STATUS
+-- ============================================================
+CREATE TABLE IF NOT EXISTS user_edging_status (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  is_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_edging_status_user_id
+ON user_edging_status(user_id);
+
+DROP TRIGGER IF EXISTS trg_user_edging_status_updated_at ON user_edging_status;
+CREATE TRIGGER trg_user_edging_status_updated_at
+BEFORE UPDATE ON user_edging_status
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+-- ============================================================
+-- USER RISK LIMITS
+-- ============================================================
+CREATE TABLE IF NOT EXISTS user_risk_limits (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  is_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  daily_loss_limit NUMERIC(15, 2),
+  daily_profit_target NUMERIC(15, 2),
+  max_trades_per_day INT,
+  cooldown_after_loss_mins INT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+DROP TRIGGER IF EXISTS trg_user_risk_limits_updated_at ON user_risk_limits;
+CREATE TRIGGER trg_user_risk_limits_updated_at
+BEFORE UPDATE ON user_risk_limits
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+-- ============================================================
+-- ADMIN STRATEGY TRADE SCHEDULE SETTINGS
+-- ============================================================
+CREATE TABLE IF NOT EXISTS admin_strategy_trade_schedule_settings (
+  id INT PRIMARY KEY,
+  is_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata',
+  windows JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO admin_strategy_trade_schedule_settings (id, is_enabled, timezone, windows)
+VALUES (1, FALSE, 'Asia/Kolkata', '[]'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+DROP TRIGGER IF EXISTS trg_admin_strategy_trade_schedule_settings_updated_at ON admin_strategy_trade_schedule_settings;
+CREATE TRIGGER trg_admin_strategy_trade_schedule_settings_updated_at
+BEFORE UPDATE ON admin_strategy_trade_schedule_settings
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
 
 -- ============================================================
 -- AUTH PROVIDERS
@@ -208,9 +295,44 @@ CREATE TABLE IF NOT EXISTS alert_snapshots (
   volume NUMERIC(30, 2),
   currency VARCHAR(10),
   base_currency VARCHAR(10),
+  execution_mode VARCHAR(20),
+  entry_ref VARCHAR(100),
+  order_type VARCHAR(20),
+  limit_price NUMERIC(15, 6),
+  stop_price NUMERIC(15, 6),
+  stop_loss NUMERIC(15, 6),
+  take_profit NUMERIC(15, 6),
+  stop_loss_distance NUMERIC(15, 6),
+  take_profit_distance NUMERIC(15, 6),
+  stop_loss_amount NUMERIC(15, 6),
+  take_profit_amount NUMERIC(15, 6),
+  trailing_stop_loss BOOLEAN,
+  guaranteed_stop_loss BOOLEAN,
+  stop_loss_trigger_method VARCHAR(30),
+  trailing_take_profit_activation_distance NUMERIC(15, 6),
+  trailing_take_profit_distance NUMERIC(15, 6),
+  break_even_activation_distance NUMERIC(15, 6),
+  break_even_offset_distance NUMERIC(15, 6),
+  trailing_stop_loss_distance NUMERIC(15, 6),
+  trading_strength NUMERIC(15, 6),
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
+
+ALTER TABLE alert_snapshots
+  ADD COLUMN IF NOT EXISTS stop_loss_amount NUMERIC(15, 6);
+
+ALTER TABLE alert_snapshots
+  ADD COLUMN IF NOT EXISTS take_profit_amount NUMERIC(15, 6);
+
+ALTER TABLE alert_snapshots
+  ADD COLUMN IF NOT EXISTS break_even_activation_distance NUMERIC(15, 6);
+
+ALTER TABLE alert_snapshots
+  ADD COLUMN IF NOT EXISTS break_even_offset_distance NUMERIC(15, 6);
+
+ALTER TABLE alert_snapshots
+  ADD COLUMN IF NOT EXISTS trailing_stop_loss_distance NUMERIC(15, 6);
 
 DROP TRIGGER IF EXISTS set_timestamp_alert_snapshots ON alert_snapshots;
 CREATE TRIGGER set_timestamp_alert_snapshots
@@ -242,6 +364,7 @@ CREATE TABLE IF NOT EXISTS subscription_plans (
   name TEXT NOT NULL,
   description TEXT,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  admin_webhook_token TEXT,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
@@ -252,6 +375,9 @@ CREATE TABLE IF NOT EXISTS subscription_plans (
 CREATE INDEX IF NOT EXISTS idx_subscription_plans_type ON subscription_plans(plan_type_id);
 CREATE INDEX IF NOT EXISTS idx_subscription_plans_market ON subscription_plans(market_id);
 CREATE INDEX IF NOT EXISTS idx_subscription_plans_active ON subscription_plans(is_active);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_subscription_plans_admin_webhook_token
+ON subscription_plans(admin_webhook_token)
+WHERE admin_webhook_token IS NOT NULL;
 
 DROP TRIGGER IF EXISTS set_timestamp_subscription_plans ON subscription_plans;
 CREATE TRIGGER set_timestamp_subscription_plans
@@ -333,6 +459,7 @@ CREATE TABLE IF NOT EXISTS user_subscriptions (
   start_date TIMESTAMPTZ NOT NULL DEFAULT now(),
   end_date TIMESTAMPTZ,
   cancel_at TIMESTAMPTZ,
+  canceled_at TIMESTAMPTZ,
 
   auto_renew BOOLEAN DEFAULT TRUE,
   webhook_token TEXT,
@@ -462,6 +589,90 @@ CREATE TABLE IF NOT EXISTS plan_strategies (
 
 CREATE INDEX IF NOT EXISTS idx_plan_strategies_plan ON plan_strategies(plan_id);
 CREATE INDEX IF NOT EXISTS idx_plan_strategies_strategy ON plan_strategies(strategy_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_plan_strategies_plan_id
+ON plan_strategies(plan_id);
+
+-- ============================================================
+-- ADMIN STRATEGY TRADE PARENTS
+-- ============================================================
+CREATE TABLE IF NOT EXISTS admin_strategy_trades (
+  id BIGSERIAL PRIMARY KEY,
+  plan_id BIGINT NOT NULL REFERENCES subscription_plans(id) ON DELETE RESTRICT,
+  strategy_id BIGINT NOT NULL REFERENCES strategies(id) ON DELETE RESTRICT,
+  placed_by_admin_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  source VARCHAR(30) NOT NULL DEFAULT 'plan_webhook',
+  action VARCHAR(10) NOT NULL,
+  symbol VARCHAR(20) NOT NULL,
+  exchange VARCHAR(50),
+  price NUMERIC(30, 8),
+  execution_mode VARCHAR(20),
+  entry_ref VARCHAR(100),
+  order_type VARCHAR(20),
+  limit_price NUMERIC(15, 6),
+  stop_price NUMERIC(15, 6),
+  stop_loss NUMERIC(15, 6),
+  take_profit NUMERIC(15, 6),
+  stop_loss_distance NUMERIC(15, 6),
+  take_profit_distance NUMERIC(15, 6),
+  stop_loss_amount NUMERIC(15, 6),
+  take_profit_amount NUMERIC(15, 6),
+  trailing_stop_loss BOOLEAN,
+  guaranteed_stop_loss BOOLEAN,
+  stop_loss_trigger_method VARCHAR(30),
+  trailing_take_profit_activation_distance NUMERIC(15, 6),
+  trailing_take_profit_distance NUMERIC(15, 6),
+  break_even_activation_distance NUMERIC(15, 6),
+  break_even_offset_distance NUMERIC(15, 6),
+  trailing_stop_loss_distance NUMERIC(15, 6),
+  trading_strength NUMERIC(15, 6),
+  raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  execution_allowed BOOLEAN NOT NULL DEFAULT FALSE,
+  schedule_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+  schedule_window_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  recipient_count INT NOT NULL DEFAULT 0,
+  snapshot_count INT NOT NULL DEFAULT 0,
+  signal_count INT NOT NULL DEFAULT 0,
+  close_queued_count INT NOT NULL DEFAULT 0,
+  status VARCHAR(30) NOT NULL DEFAULT 'received'
+    CHECK (status IN ('received', 'blocked', 'fanned_out', 'no_signals', 'close_requested')),
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_strategy_trades_strategy_created_at
+ON admin_strategy_trades(strategy_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_admin_strategy_trades_plan_created_at
+ON admin_strategy_trades(plan_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_admin_strategy_trades_status_created_at
+ON admin_strategy_trades(status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_admin_strategy_trades_entry_ref
+ON admin_strategy_trades(entry_ref);
+
+DROP TRIGGER IF EXISTS set_timestamp_admin_strategy_trades ON admin_strategy_trades;
+CREATE TRIGGER set_timestamp_admin_strategy_trades
+BEFORE UPDATE ON admin_strategy_trades
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+ALTER TABLE alert_snapshots
+  ADD COLUMN IF NOT EXISTS admin_strategy_trade_id BIGINT REFERENCES admin_strategy_trades(id) ON DELETE SET NULL;
+
+ALTER TABLE alert_snapshots
+  ADD COLUMN IF NOT EXISTS strategy_id BIGINT REFERENCES strategies(id) ON DELETE SET NULL;
+
+ALTER TABLE alert_snapshots
+  ADD COLUMN IF NOT EXISTS plan_id BIGINT REFERENCES subscription_plans(id) ON DELETE SET NULL;
+
+ALTER TABLE alert_snapshots
+  ADD COLUMN IF NOT EXISTS subscription_id BIGINT REFERENCES user_subscriptions(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_alert_snapshots_admin_strategy_trade_id
+ON alert_snapshots(admin_strategy_trade_id);
+
+CREATE INDEX IF NOT EXISTS idx_alert_snapshots_strategy_created_at
+ON alert_snapshots(strategy_id, created_at DESC);
 
 -- ============================================================
 -- USER TRADING ACCOUNTS + STRATEGY INSTANCES + HEARTBEATS
@@ -469,12 +680,15 @@ CREATE INDEX IF NOT EXISTS idx_plan_strategies_strategy ON plan_strategies(strat
 CREATE TABLE IF NOT EXISTS user_trading_accounts (
   id BIGSERIAL PRIMARY KEY,
   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  subscription_id BIGINT REFERENCES user_subscriptions(id) ON DELETE SET NULL,
   broker_id BIGINT NOT NULL REFERENCES brokers(id) ON DELETE RESTRICT,
   account_id TEXT NOT NULL UNIQUE,
   is_master BOOLEAN NOT NULL DEFAULT FALSE,
+  execution_flow execution_flow NOT NULL DEFAULT 'API',
   account_label TEXT,
   account_meta JSONB DEFAULT '{}'::jsonb,
   credentials_encrypted TEXT NOT NULL,
+  is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   status trading_account_status NOT NULL DEFAULT 'pending',
   access_token TEXT,
   refresh_token TEXT,
@@ -483,6 +697,19 @@ CREATE TABLE IF NOT EXISTS user_trading_accounts (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
+ALTER TABLE user_trading_accounts
+  ADD COLUMN IF NOT EXISTS subscription_id BIGINT REFERENCES user_subscriptions(id) ON DELETE SET NULL;
+
+ALTER TABLE user_trading_accounts
+  ADD COLUMN IF NOT EXISTS execution_flow execution_flow NOT NULL DEFAULT 'API';
+
+ALTER TABLE user_trading_accounts
+  ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+
+UPDATE user_trading_accounts
+SET is_enabled = TRUE
+WHERE is_enabled IS NULL;
+
 
 CREATE UNIQUE INDEX uniq_master_per_user_broker
 ON user_trading_accounts (user_id, broker_id)
@@ -490,8 +717,10 @@ WHERE is_master = true;
 
 
 CREATE INDEX IF NOT EXISTS idx_user_trading_accounts_user ON user_trading_accounts(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_trading_accounts_subscription ON user_trading_accounts(subscription_id);
 CREATE INDEX IF NOT EXISTS idx_user_trading_accounts_broker ON user_trading_accounts(broker_id);
 CREATE INDEX IF NOT EXISTS idx_user_trading_accounts_status ON user_trading_accounts(status);
+CREATE INDEX IF NOT EXISTS idx_user_trading_accounts_is_enabled ON user_trading_accounts(is_enabled);
 
 DROP TRIGGER IF EXISTS set_timestamp_user_trading_accounts ON user_trading_accounts;
 CREATE TRIGGER set_timestamp_user_trading_accounts
@@ -514,9 +743,117 @@ CREATE TABLE IF NOT EXISTS trade_signals (
   asset_type trade_category NOT NULL,
   signal_time TIMESTAMPTZ NOT NULL,
   order_id BIGINT,
+  execution_mode VARCHAR(20),
+  entry_ref VARCHAR(100),
+  order_type VARCHAR(20),
+  limit_price NUMERIC(15, 6),
+  stop_price NUMERIC(15, 6),
+  stop_loss NUMERIC(15, 6),
+  take_profit NUMERIC(15, 6),
+  stop_loss_distance NUMERIC(15, 6),
+  take_profit_distance NUMERIC(15, 6),
+  stop_loss_amount NUMERIC(15, 6),
+  take_profit_amount NUMERIC(15, 6),
+  trailing_stop_loss BOOLEAN,
+  guaranteed_stop_loss BOOLEAN,
+  stop_loss_trigger_method VARCHAR(30),
+  trailing_take_profit_activation_distance NUMERIC(15, 6),
+  trailing_take_profit_distance NUMERIC(15, 6),
+  break_even_activation_distance NUMERIC(15, 6),
+  break_even_offset_distance NUMERIC(15, 6),
+  trailing_stop_loss_distance NUMERIC(15, 6),
+  broker_order_id BIGINT,
+  broker_position_id BIGINT,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS execution_mode VARCHAR(20);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS entry_ref VARCHAR(100);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS order_type VARCHAR(20);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS limit_price NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS stop_price NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS stop_loss NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS take_profit NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS stop_loss_distance NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS take_profit_distance NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS stop_loss_amount NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS take_profit_amount NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS trailing_stop_loss BOOLEAN;
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS guaranteed_stop_loss BOOLEAN;
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS stop_loss_trigger_method VARCHAR(30);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS trailing_take_profit_activation_distance NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS trailing_take_profit_distance NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS break_even_activation_distance NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS break_even_offset_distance NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS trailing_stop_loss_distance NUMERIC(15, 6);
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS broker_order_id BIGINT;
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS broker_position_id BIGINT;
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS admin_strategy_trade_id BIGINT REFERENCES admin_strategy_trades(id) ON DELETE SET NULL;
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS strategy_id BIGINT REFERENCES strategies(id) ON DELETE SET NULL;
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS plan_id BIGINT REFERENCES subscription_plans(id) ON DELETE SET NULL;
+
+ALTER TABLE trade_signals
+  ADD COLUMN IF NOT EXISTS subscription_id BIGINT REFERENCES user_subscriptions(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_trade_signals_trading_account_entry_ref_created_at
+ON trade_signals(trading_account_id, entry_ref, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trade_signals_entry_ref_execution_mode
+ON trade_signals(entry_ref, execution_mode);
+
+CREATE INDEX IF NOT EXISTS idx_trade_signals_admin_strategy_trade_created_at
+ON trade_signals(admin_strategy_trade_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trade_signals_strategy_created_at
+ON trade_signals(strategy_id, created_at DESC);
 
 DROP TRIGGER IF EXISTS set_timestamp_trade_signals ON trade_signals;
 CREATE TRIGGER set_timestamp_trade_signals
@@ -528,9 +865,20 @@ CREATE TABLE IF NOT EXISTS trade_signals_status (
   signal_id INT NOT NULL REFERENCES trade_signals(id) ON DELETE CASCADE,  
   status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'closed', 'pending_close')),
   attempts INT NOT NULL DEFAULT 0,
+  last_error TEXT,
+  next_retry_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
+
+ALTER TABLE trade_signals_status
+  ADD COLUMN IF NOT EXISTS last_error TEXT;
+
+ALTER TABLE trade_signals_status
+  ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_trade_signals_status_status_next_retry_at
+ON trade_signals_status(status, next_retry_at);
 
 DROP TRIGGER IF EXISTS set_timestamp_trade_signals_status ON trade_signals_status;
 CREATE TRIGGER set_timestamp_trade_signals_status
@@ -548,6 +896,7 @@ CREATE TABLE IF NOT EXISTS user_strategy_instances (
   status user_strategy_status NOT NULL DEFAULT 'active',
   strategy_version INT NOT NULL,
   frozen_params JSONB NOT NULL DEFAULT '{}'::jsonb,
+  volume NUMERIC(4,2) NOT NULL DEFAULT 0.01 CHECK (volume >= 0.01 AND volume <= 0.10),
   activated_at TIMESTAMPTZ DEFAULT now(),
   paused_at TIMESTAMPTZ,
   stopped_at TIMESTAMPTZ,
@@ -555,8 +904,8 @@ CREATE TABLE IF NOT EXISTS user_strategy_instances (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_user_strategy_per_account
-ON user_strategy_instances(user_id, strategy_id, trading_account_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_user_strategy_subscription_strategy
+ON user_strategy_instances(subscription_id, strategy_id);
 
 CREATE INDEX IF NOT EXISTS idx_user_strategy_instances_user ON user_strategy_instances(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_strategy_instances_subscription ON user_strategy_instances(subscription_id);
@@ -568,6 +917,114 @@ CREATE INDEX IF NOT EXISTS idx_user_strategy_instances_status ON user_strategy_i
 DROP TRIGGER IF EXISTS set_timestamp_user_strategy_instances ON user_strategy_instances;
 CREATE TRIGGER set_timestamp_user_strategy_instances
 BEFORE UPDATE ON user_strategy_instances
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+CREATE TABLE IF NOT EXISTS ctrader_trailing_take_profit_monitors (
+  id BIGSERIAL PRIMARY KEY,
+  trade_signal_id BIGINT NOT NULL UNIQUE REFERENCES trade_signals(id) ON DELETE CASCADE,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  trading_account_id BIGINT NOT NULL REFERENCES user_trading_accounts(id) ON DELETE CASCADE,
+  account_id BIGINT NOT NULL,
+  env VARCHAR(10) NOT NULL CHECK (env IN ('demo', 'live')),
+  symbol VARCHAR(50) NOT NULL,
+  side VARCHAR(10) NOT NULL CHECK (side IN ('BUY', 'SELL')),
+  entry_ref VARCHAR(100) NOT NULL,
+  symbol_id INTEGER,
+  broker_order_id BIGINT,
+  broker_position_id BIGINT,
+  entry_price NUMERIC(15, 6),
+  trailing_take_profit_activation_distance NUMERIC(15, 6),
+  trailing_take_profit_distance NUMERIC(15, 6),
+  best_price NUMERIC(15, 6),
+  armed BOOLEAN NOT NULL DEFAULT FALSE,
+  break_even_activation_distance NUMERIC(15, 6),
+  break_even_offset_distance NUMERIC(15, 6),
+  trailing_stop_loss_distance NUMERIC(15, 6),
+  stop_loss_protection_armed BOOLEAN NOT NULL DEFAULT FALSE,
+  stop_loss_best_price NUMERIC(15, 6),
+  current_stop_loss NUMERIC(15, 6),
+  monitor_status VARCHAR(20) NOT NULL DEFAULT 'pending_fill'
+    CHECK (monitor_status IN ('pending_fill', 'active', 'closing', 'completed', 'failed', 'disabled')),
+  last_error TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+ALTER TABLE ctrader_trailing_take_profit_monitors
+  ALTER COLUMN trailing_take_profit_activation_distance DROP NOT NULL;
+
+ALTER TABLE ctrader_trailing_take_profit_monitors
+  ALTER COLUMN trailing_take_profit_distance DROP NOT NULL;
+
+ALTER TABLE ctrader_trailing_take_profit_monitors
+  ADD COLUMN IF NOT EXISTS break_even_activation_distance NUMERIC(15, 6);
+
+ALTER TABLE ctrader_trailing_take_profit_monitors
+  ADD COLUMN IF NOT EXISTS break_even_offset_distance NUMERIC(15, 6);
+
+ALTER TABLE ctrader_trailing_take_profit_monitors
+  ADD COLUMN IF NOT EXISTS trailing_stop_loss_distance NUMERIC(15, 6);
+
+ALTER TABLE ctrader_trailing_take_profit_monitors
+  ADD COLUMN IF NOT EXISTS stop_loss_protection_armed BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE ctrader_trailing_take_profit_monitors
+  ADD COLUMN IF NOT EXISTS stop_loss_best_price NUMERIC(15, 6);
+
+ALTER TABLE ctrader_trailing_take_profit_monitors
+  ADD COLUMN IF NOT EXISTS current_stop_loss NUMERIC(15, 6);
+
+CREATE INDEX IF NOT EXISTS idx_ctrader_ttp_monitors_status_updated_at
+ON ctrader_trailing_take_profit_monitors(monitor_status, updated_at DESC);
+
+DROP TRIGGER IF EXISTS set_timestamp_ctrader_trailing_take_profit_monitors ON ctrader_trailing_take_profit_monitors;
+CREATE TRIGGER set_timestamp_ctrader_trailing_take_profit_monitors
+BEFORE UPDATE ON ctrader_trailing_take_profit_monitors
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+CREATE TABLE IF NOT EXISTS zebu_protection_monitors (
+  id BIGSERIAL PRIMARY KEY,
+  trade_signal_id BIGINT NOT NULL UNIQUE REFERENCES trade_signals(id) ON DELETE CASCADE,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  trading_account_id BIGINT NOT NULL REFERENCES user_trading_accounts(id) ON DELETE CASCADE,
+  symbol VARCHAR(80) NOT NULL,
+  exchange VARCHAR(20) NOT NULL,
+  side VARCHAR(10) NOT NULL CHECK (side IN ('BUY', 'SELL')),
+  entry_ref VARCHAR(100),
+  quantity NUMERIC(20, 6) NOT NULL,
+  product VARCHAR(20),
+  validity VARCHAR(20),
+  entry_order_id BIGINT NOT NULL,
+  stop_order_id BIGINT,
+  target_order_id BIGINT,
+  token VARCHAR(60),
+  tick_size NUMERIC(18, 8),
+  entry_price NUMERIC(15, 6),
+  stop_loss NUMERIC(15, 6),
+  take_profit NUMERIC(15, 6),
+  stop_loss_distance NUMERIC(15, 6),
+  take_profit_distance NUMERIC(15, 6),
+  break_even_activation_distance NUMERIC(15, 6),
+  break_even_offset_distance NUMERIC(15, 6),
+  trailing_stop_loss_distance NUMERIC(15, 6),
+  current_stop_price NUMERIC(15, 6),
+  best_price NUMERIC(15, 6),
+  monitor_status VARCHAR(20) NOT NULL DEFAULT 'pending_fill'
+    CHECK (monitor_status IN ('pending_fill', 'active', 'closing', 'completed', 'failed', 'disabled')),
+  last_error TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_zebu_protection_monitors_status_updated_at
+ON zebu_protection_monitors(monitor_status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_zebu_protection_monitors_account_symbol
+ON zebu_protection_monitors(trading_account_id, symbol, exchange);
+
+DROP TRIGGER IF EXISTS set_timestamp_zebu_protection_monitors ON zebu_protection_monitors;
+CREATE TRIGGER set_timestamp_zebu_protection_monitors
+BEFORE UPDATE ON zebu_protection_monitors
 FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
 
 CREATE TABLE IF NOT EXISTS pine_connector_heartbeats (
@@ -819,10 +1276,19 @@ CREATE TABLE IF NOT EXISTS ctrader_symbols (
   account_id INTEGER NOT NULL,
   symbol_name VARCHAR(50) NOT NULL,
   symbol_id INTEGER NOT NULL,
+  lot_size BIGINT,
+  digits INTEGER,
+  pip_position INTEGER,
+  sl_distance INTEGER,
+  tp_distance INTEGER,
+  distance_set_in VARCHAR(40),
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now(),
   expires_at TIMESTAMPTZ
 );
+
+ALTER TABLE ctrader_symbols
+  ADD COLUMN IF NOT EXISTS lot_size BIGINT;
 
 CREATE INDEX IF NOT EXISTS idx_ctrader_symbols_composite ON ctrader_symbols(user_id, env, account_id);
 CREATE INDEX IF NOT EXISTS idx_ctrader_symbols_symbol_name ON ctrader_symbols(symbol_name);
@@ -831,6 +1297,69 @@ CREATE INDEX IF NOT EXISTS idx_ctrader_symbols_expires_at ON ctrader_symbols(exp
 DROP TRIGGER IF EXISTS set_timestamp_ctrader_symbols ON ctrader_symbols;
 CREATE TRIGGER set_timestamp_ctrader_symbols
 BEFORE UPDATE ON ctrader_symbols
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+-- ============================================================
+-- SUPPORT TICKETS
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS support_tickets (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  external_ticket_id VARCHAR(120) NOT NULL UNIQUE,
+  crm_ticket_id VARCHAR(120) UNIQUE,
+  platform_user_id VARCHAR(120) NOT NULL,
+  contact_email CITEXT NOT NULL,
+  contact_name TEXT,
+  subject VARCHAR(255) NOT NULL,
+  status VARCHAR(32) NOT NULL,
+  assigned_executive_id VARCHAR(120),
+  assigned_executive_name VARCHAR(255),
+  last_customer_message_at TIMESTAMPTZ,
+  last_agent_reply_at TIMESTAMPTZ,
+  closed_at TIMESTAMPTZ,
+  sync_status VARCHAR(32) NOT NULL DEFAULT 'pending',
+  last_sync_error TEXT,
+  last_sync_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_tickets_user_updated_at
+ON support_tickets (user_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_support_tickets_status_updated_at
+ON support_tickets (status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_support_tickets_platform_user_id
+ON support_tickets (platform_user_id);
+
+DROP TRIGGER IF EXISTS set_timestamp_support_tickets ON support_tickets;
+CREATE TRIGGER set_timestamp_support_tickets
+BEFORE UPDATE ON support_tickets
+FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
+
+CREATE TABLE IF NOT EXISTS support_ticket_messages (
+  id SERIAL PRIMARY KEY,
+  ticket_id INT NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+  external_message_id VARCHAR(120) UNIQUE,
+  crm_message_id VARCHAR(120) UNIQUE,
+  author_type VARCHAR(32) NOT NULL,
+  body TEXT NOT NULL,
+  sync_status VARCHAR(32) NOT NULL DEFAULT 'pending',
+  last_sync_error TEXT,
+  last_sync_at TIMESTAMPTZ,
+  emailed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_ticket_messages_ticket_created_at
+ON support_ticket_messages (ticket_id, created_at);
+
+DROP TRIGGER IF EXISTS set_timestamp_support_ticket_messages ON support_ticket_messages;
+CREATE TRIGGER set_timestamp_support_ticket_messages
+BEFORE UPDATE ON support_ticket_messages
 FOR EACH ROW EXECUTE PROCEDURE trigger_set_timestamp();
 
 -- ============================================================

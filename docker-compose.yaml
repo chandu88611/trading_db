@@ -4,14 +4,22 @@ services:
     container_name: kite-postgres
     restart: always
     environment:
-      POSTGRES_PASSWORD: kitepass
-      POSTGRES_USER: kite
-      POSTGRES_DB: kite
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_USER: ${POSTGRES_USER:-kite}
+      POSTGRES_DB: ${POSTGRES_DB:-kite}
     ports:
-      - 5449:5432
+      - 127.0.0.1:5449:5432
     volumes:
       - ./postgres/data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kite} -d ${POSTGRES_DB:-kite}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - kite-network
 
 networks:
   kite-network:
